@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Emanuele Ruffaldi 2017
 # ==============================================================================
 
 """A deep MNIST classifier using convolutional layers.
@@ -26,14 +28,55 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import time
+import math
 import argparse
 import sys
-
+import json
+import numpy as np
+import uuid
 from tensorflow.examples.tutorials.mnist import input_data
 
 import tensorflow as tf
 
+from sys import platform
 FLAGS = None
+
+def machine():
+  return dict(linux="glx64",darwin="maci64",win32="win32").get(platform)
+
+
+def getAccuracy(matrix):
+  #sum(diag(mat))/(sum(mat))
+  sumd = np.sum(np.diagonal(matrix))
+  sumall = np.sum(matrix)
+  sumall = np.add(sumall,0.00000001)
+  return sumd/sumall
+
+def getPrecision(matrix):
+  #diag(mat) / rowSum(mat)
+  sumrow = np.sum(matrix,axis=1)
+  sumrow = np.add(sumrow,0.00000001)
+  precision = np.divide(np.diagonal(matrix),sumrow)
+  return np.sum(precision)/precision.shape[0]
+
+def getRecall(matrix):
+  #diag(mat) / colsum(mat)
+  sumcol = np.sum(matrix,axis=0)
+  sumcol = np.add(sumcol,0.00000001)
+  recall = np.divide(np.diagonal(matrix),sumcol)
+  return np.sum(recall)/recall.shape[0]
+
+def getSensitivity(matrix):
+  return 0;
+
+def getSpecificity(matrix):
+  return 0;
+
+def get2f(matrix):
+  #2*precision*recall/(precision+recall)
+  precision = getPrecision(matrix)
+  recall = getRecall(matrix)
+  return (2*precision*recall)/(precision+recall)
 
 
 def deepnn(x,filter1_size=5,features1=32,filter2_size=5,features2=64,densesize=1024,classes=10):
@@ -160,29 +203,64 @@ def main(_):
     kw["intra_op_parallelism_threads"]=1
     kw["inter_op_parallelism_threads"]=1
 
+  iterations = FLAGS.epochs*int(math.ceil(60000.0/FLAGS.batchsize))
   config = tf.ConfigProto(**kw)
   sess = tf.InteractiveSession(config=config)
   #train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
-  correct_prediction = tf.equal(tf.argmax(y_conv, 1), tf.argmax(y_, 1))
+  predictions = tf.argmax(y_conv, 1)
+  correct_prediction = tf.equal(predictions, tf.argmax(y_, 1))
   accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
   if True: #with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
     t0 = time.time()
-    for i in range(FLAGS.iter):
-      batch = mnist.train.next_batch(FLAGS.batch)
+    for i in range(iterations):
+      batch = mnist.train.next_batch(FLAGS.batchsize)
       if False and i % 100 == 0:
         train_accuracy = accuracy.eval(feed_dict={
             x: batch[0], y_: batch[1], keep_prob: 1.0})
         print('step %d, training accuracy %g' % (i, train_accuracy))
-      train_step.run(feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
-    print ("training_time",time.time()-t0)
-    print ("iterations",FLAGS.iter)
-    print ("batchsize",FLAGS.batch)
+      _,cross_entropy_value = sess.run([train_step,cross_entropy], feed_dict={x: batch_xs, y_: batch_ys,keep_prob: 0.5})
+      losses[i] = cross_entropy_value
+      #train_step.run(feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
+    training_time = time.time()-t0
+    print ("training_time",training_time)
+    print ("iterations",iterations)
+    print ("batchsize",FLAGS.batchsize)
 
-    print('test accuracy %g' % accuracy.eval(feed_dict={
-        x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0}))
+    t0 = time.time()
+    evaliterations = int(math.ceil(10000.0/FLAGS.batchsize))
+    accuracyvalue = 0
+    accuracyvaluecount = 0
+    cm = None
+    for i in range(evaliterations):
+      batch = mnist.test.next_batch(FLAGS.batchsize)
+      accuracyvalue += accuracy.eval(feed_dict={
+        x: batch[0], y_: batch[1], keep_prob: 1.0})
+      accuracyvaluecount += 1
+      cma = sess.run(tf.contrib.metrics.confusion_matrix(tf.argmax(y_, 1),predictions,10),feed_dict={x: batch[0],y_: batch[1], keep_prob: 1.0})
+      if cm is None:
+        cm =  cma
+      else:
+        cm += cma
+    accuracyvalue /= accuracyvaluecount
 
+    test_time = time.time()-t0
+    print('test accuracy %g' % accuracyvalue)
+
+    print (cm)
+    cm_accuracy = getAccuracy(cm)
+    cm_Fscore = get2f(cm)
+    cm_sensitivity = getSensitivity(cm)
+    cm_specificity = getSpecificity(cm)
+    print ("test CM accuracy",cm_accuracy,"CM F1",cm_Fscore)
+
+    go = str(uuid.uuid1())+'.json';
+    args = FLAGS
+    out = dict(accuracy=float(accuracyvalue),training_time=training_time,single_core=1 if args.singlecore else 0,implementation="tf",type='single',test='cnn',gpu=0 if args.no_gpu else 1,machine=machine(),epochs=args.epochs,batchsize=args.batchsize,now_unix=time.time(),cnn_specs=(args.filter1,args.filter2,args.features1,args.features2,args.dense),cm_accuracy=float(cm_accuracy),cm_Fscore=float(cm_Fscore),iterations=iterations,testing_time=test_time,total_params=total_parameters,cm_specificity=float(cm_specificity),cm_sensitivity=float(cm_sensitivity))
+    open(go,"w").write(json.dumps(out))
+    np.savetxt(go+".loss.txt", losses)
+    
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--data_dir', type=str,
@@ -193,9 +271,9 @@ if __name__ == '__main__':
   parser.add_argument('-d','--dense',type=int,default=1024,help='dense bank');
   parser.add_argument('-A','--features1',type=int,default=32,help='features of first');
   parser.add_argument('-B','--features2',type=int,default=64,help='features of second');
-  parser.add_argument('--original',help='picks original Tensorflow values (3.5M parameters)')
-  parser.add_argument('--light',help='light values (400k parameters)')
-  parser.add_argument('--lighter',help='lighter values (100k parameters)')
+  parser.add_argument('--original',action="store_true",help='picks original Tensorflow values (3.5M parameters)')
+  parser.add_argument('--light',action="store_true",help='light values (400k parameters)')
+  parser.add_argument('--lighter',action="store_true",help='lighter values (100k parameters)')
   parser.add_argument('--p57',action="store_true",help='(57k parameters)')
 
   parser.add_argument('--no-gpu',action="store_true")
@@ -203,8 +281,9 @@ if __name__ == '__main__':
   parser.add_argument('--adam',action="store_true")
   parser.add_argument('--adam_rate',default=1e-4,type=float)
   parser.add_argument('--gradient_rate',default=0.5,type=float)
-  parser.add_argument('--iter',help="iterations",default=1870)
-  parser.add_argument('--batch',help="batch size",default=64)
+  parser.add_argument('--epochs',help="epochs",default=10,type=int)
+  parser.add_argument('--batchsize',help="batch size",type=int,default=100)
+  parser.add_argument('-w',action="store_true")
   FLAGS, unparsed = parser.parse_known_args()
   if FLAGS.original:
     # 1M
