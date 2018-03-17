@@ -35,6 +35,7 @@ import json
 import numpy as np
 import uuid
 from tensorflow.examples.tutorials.mnist import input_data
+from tensorflow.python.client import timeline
 
 import tensorflow as tf
 
@@ -211,6 +212,12 @@ def main(_):
   correct_prediction = tf.equal(predictions, tf.argmax(y_, 1))
   accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
+  run_metadata = tf.RunMetadata()
+  if FLAGS.trace:
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+  else:
+    run_options = tf.RunOptions()
+
   if True: #with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
     t0 = time.time()
@@ -218,7 +225,7 @@ def main(_):
       batch = mnist.train.next_batch(FLAGS.batchsize)
       if False and i % 100 == 0:
         train_accuracy = accuracy.eval(feed_dict={
-            x: batch[0], y_: batch[1], keep_prob: 1.0})
+            x: batch[0], y_: batch[1], keep_prob: 1.0}, options=run_options, run_metadata=run_metadata)
         print('step %d, training accuracy %g' % (i, train_accuracy))
       _,cross_entropy_value = sess.run([train_step,cross_entropy], feed_dict={x: batch_xs, y_: batch_ys,keep_prob: 0.5})
       losses[i] = cross_entropy_value
@@ -235,8 +242,8 @@ def main(_):
     cm = None
     for i in range(evaliterations):
       batch = mnist.test.next_batch(FLAGS.batchsize)
-      accuracyvalue += accuracy.eval(feed_dict={
-        x: batch[0], y_: batch[1], keep_prob: 1.0})
+      accuracyvalue += sess.run(accuracy,feed_dict={
+        x: batch[0], y_: batch[1], keep_prob: 1.0},)
       accuracyvaluecount += 1
       cma = sess.run(tf.contrib.metrics.confusion_matrix(tf.argmax(y_, 1),predictions,10),feed_dict={x: batch[0],y_: batch[1], keep_prob: 1.0})
       if cm is None:
@@ -254,6 +261,17 @@ def main(_):
     cm_sensitivity = getSensitivity(cm)
     cm_specificity = getSpecificity(cm)
     print ("test CM accuracy",cm_accuracy,"CM F1",cm_Fscore)
+
+    if FLAGS.trace:
+      # Create the Timeline object, and write it to a json
+      tl = timeline.Timeline(run_metadata.step_stats)
+      ctf = tl.generate_chrome_trace_format(show_memory=True)
+      with open('cnn_accuracy_timeline.json', 'w') as f:
+          f.write(ctf)
+      graph_def = tf.get_default_graph().as_graph_def()
+      json_string = json_format.MessageToJson(graph_def)
+      with open('cnn_structure.json', 'w') as f:
+        f.write(json_string)
 
     go = str(uuid.uuid1())+'.json';
     args = FLAGS
@@ -277,6 +295,7 @@ if __name__ == '__main__':
   parser.add_argument('--p57',action="store_true",help='(57k parameters)')
 
   parser.add_argument('--no-gpu',action="store_true")
+  parser.add_argument('--trace',action="store_true")
   parser.add_argument('--singlecore',action="store_true")
   parser.add_argument('--adam',action="store_true")
   parser.add_argument('--adam_rate',default=1e-4,type=float)

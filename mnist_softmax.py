@@ -32,8 +32,9 @@ import sys
 import json
 import numpy as np
 import uuid
-
+from tensorflow.python.client import timeline
 from tensorflow.examples.tutorials.mnist import input_data
+from google.protobuf import json_format
 
 import tensorflow as tf
 from sys import platform
@@ -147,10 +148,26 @@ def main(_):
   predictions = tf.argmax(y, 1)
   correct_prediction = tf.equal(predictions, tf.argmax(y_, 1))
   t0 = time.time()
-  accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+  accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32),name="accuracy")
+  run_metadata = tf.RunMetadata()
+  if FLAGS.trace:
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+  else:
+    run_options = tf.RunOptions()
   accuracyvalue = sess.run(accuracy, feed_dict={x: mnist.test.images,
-                                      y_: mnist.test.labels})
+                                      y_: mnist.test.labels}, options=run_options, run_metadata=run_metadata)
   test_time = time.time()-t0
+  if FLAGS.trace:
+    # Create the Timeline object, and write it to a json
+    tl = timeline.Timeline(run_metadata.step_stats)
+    ctf = tl.generate_chrome_trace_format(show_memory=True)
+    with open('softmax_accuracy_timeline.json', 'w') as f:
+        f.write(ctf)
+    graph_def = tf.get_default_graph().as_graph_def()
+    json_string = json_format.MessageToJson(graph_def)
+    with open('softmax_structure.json', 'w') as f:
+      f.write(json_string)
+
   cm = sess.run(tf.contrib.metrics.confusion_matrix(tf.argmax(y_, 1),predictions,10),feed_dict={x: mnist.test.images,
                                       y_: mnist.test.labels})
   print (cm)
@@ -179,6 +196,7 @@ if __name__ == '__main__':
                       help='Directory for storing input data')
   parser.add_argument('--no-gpu',action="store_true")
   parser.add_argument('--singlecore',action="store_true")
+  parser.add_argument('--trace',action="store_true")
   parser.add_argument('--adam',action="store_true")
   parser.add_argument('--adam_rate',default=1e-4,type=float)
   parser.add_argument('--gradient_rate',default=0.5,type=float)
