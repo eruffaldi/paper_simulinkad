@@ -32,9 +32,11 @@ import sys
 import json
 import numpy as np
 import uuid
+import tensorflow.compat.v1 as tf
 from tensorflow.python.client import timeline
-from tensorflow.examples.tutorials.mnist import input_data
+import tensorflow_datasets
 from google.protobuf import json_format
+import tensorflow.compat.v1 as tf
 
 import tensorflow as tf
 from sys import platform
@@ -81,7 +83,13 @@ def getSpecificity(matrix):
 def main(_):
   # Import data
   print ("updated")
-  mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+  dsTR = tensorflow_datasets.load('mnist',split='train')
+  dsTR = ds.shuffle(1024).batch(FLAGS.batch_size).prefetch(tf.data.AUTOTUNE)
+  dsTE = tensorflow_datasets.load('mnist',split='test')
+  #input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+
+  tf.compat.v1.disable_eager_execution()
+
 
   # Create the model
   x = tf.placeholder(tf.float32, [None, 784])
@@ -136,13 +144,13 @@ def main(_):
   t0 = time.time()
   losses = np.zeros((iterations,1))
   for i in range(iterations):
-    batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batchsize)
+    batch_xs, batch_ys = next(dsTR)
     _,cross_entropy_value = sess.run([train_step,cross_entropy], feed_dict={x: batch_xs, y_: batch_ys})
     losses[i] = cross_entropy_value
   training_time = time.time()-t0
   print ("training_time",training_time)
   print ("iterations",iterations)
-  print ("batchsize",FLAGS.batchsize)
+  print ("batchsize",FLAGS.batch_size)
 
   # Test trained model
   predictions = tf.argmax(y, 1)
@@ -154,8 +162,23 @@ def main(_):
     run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
   else:
     run_options = tf.RunOptions()
-  accuracyvalue = sess.run(accuracy, feed_dict={x: mnist.test.images,
-                                      y_: mnist.test.labels}, options=run_options, run_metadata=run_metadata)
+
+  accuracyvalue = 0
+  accuracyvaluecount = 0
+  cm = None
+  for i in range(evaliterations):
+    batch = next(dsTE)
+    accuracyvalue += sess.run(accuracy,feed_dict={
+      x: batch[0], y_: batch[1], keep_prob: 1.0},)
+    accuracyvaluecount += 1
+    cma = sess.run(tf.contrib.metrics.confusion_matrix(tf.argmax(y_, 1),predictions,10),feed_dict={x: batch[0],y_: batch[1], keep_prob: 1.0})
+    if cm is None:
+      cm =  cma
+    else:
+      cm += cma
+  accuracyvalue /= accuracyvaluecount
+
+
   test_time = time.time()-t0
   if FLAGS.trace:
     # Create the Timeline object, and write it to a json
@@ -186,7 +209,7 @@ def main(_):
 
   go = str(uuid.uuid1())+'.json';
   args = FLAGS
-  out = dict(accuracy=float(accuracyvalue),machine=machine(),training_time=training_time,implementation="tf",single_core=1 if args.singlecore else 0,type='single',test='softmax',gpu=0 if args.no_gpu else 1,epochs=args.epochs,batchsize=args.batchsize,now_unix=time.time(),cm_accuracy=float(cm_accuracy),cm_Fscore=float(cm_Fscore),iterations=iterations,testing_time=test_time,total_params=total_parameters,cm_specificity=float(cm_specificity),cm_sensitivity=float(cm_sensitivity))
+  out = dict(accuracy=float(accuracyvalue),machine=machine(),training_time=training_time,implementation="tf",single_core=1 if args.singlecore else 0,type='single',test='softmax',gpu=0 if args.no_gpu else 1,epochs=args.epochs,batch_size=args.batch_size,now_unix=time.time(),cm_accuracy=float(cm_accuracy),cm_Fscore=float(cm_Fscore),iterations=iterations,testing_time=test_time,total_params=total_parameters,cm_specificity=float(cm_specificity),cm_sensitivity=float(cm_sensitivity))
   open(go,"w").write(json.dumps(out))
   np.savetxt(go+".loss.txt", losses)
     
@@ -201,7 +224,7 @@ if __name__ == '__main__':
   parser.add_argument('--adam_rate',default=1e-4,type=float)
   parser.add_argument('--gradient_rate',default=0.5,type=float)
   parser.add_argument('--epochs',help="epohcs",type=int,default=10)
-  parser.add_argument('--batchsize',help="batch size",type=int,default=100)
+  parser.add_argument('--batch-size',help="batch size",type=int,default=100)
   parser.add_argument('-w',action="store_true")
   FLAGS, unparsed = parser.parse_known_args()
   tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)

@@ -34,8 +34,10 @@ import sys
 import json
 import numpy as np
 import uuid
-from tensorflow.examples.tutorials.mnist import input_data
+import tensorflow.compat.v1 as tf
+import tensorflow_datasets
 from tensorflow.python.client import timeline
+import tensorflow.compat.v1 as tf
 
 import tensorflow as tf
 
@@ -162,7 +164,13 @@ def bias_variable(shape):
 
 def main(_):
   # Import data
-  mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+  dsTR = tensorflow_datasets.load('mnist',split='train')
+  dsTR = ds.shuffle(1024).batch(FLAGS.batchsize).prefetch(tf.data.AUTOTUNE)
+  dsTE = tensorflow_datasets.load('mnist',split='test')
+
+  #input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+
+  tf.compat.v1.disable_eager_execution()
 
 
   # Create the model
@@ -222,7 +230,7 @@ def main(_):
     sess.run(tf.global_variables_initializer())
     t0 = time.time()
     for i in range(iterations):
-      batch = mnist.train.next_batch(FLAGS.batchsize)
+      batch =next(dsTR)
       if False and i % 100 == 0:
         train_accuracy = accuracy.eval(feed_dict={
             x: batch[0], y_: batch[1], keep_prob: 1.0}, options=run_options, run_metadata=run_metadata)
@@ -241,7 +249,7 @@ def main(_):
     accuracyvaluecount = 0
     cm = None
     for i in range(evaliterations):
-      batch = mnist.test.next_batch(FLAGS.batchsize)
+      batch = next(dsTE)
       accuracyvalue += sess.run(accuracy,feed_dict={
         x: batch[0], y_: batch[1], keep_prob: 1.0},)
       accuracyvaluecount += 1
