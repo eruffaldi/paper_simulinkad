@@ -11,7 +11,7 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import uuid
 from datetime import datetime
-
+import signal
 import numpy as np
 import os
 from sklearn.metrics import confusion_matrix
@@ -139,11 +139,14 @@ class NetKNN(nn.Module):
         return F.log_softmax(x,dim=1)
 
 def train(args, model, criterion, device, train_loader, optimizer, epoch):
+    global stop_requested
     model.train()
     with tqdm(train_loader, unit="batch") as tepoch:
         #for batch_idx, (data, target) in enumerate(train_loader):
         tepoch.set_description(f"Epoch {epoch}")
         for data, target in tepoch:
+            if stop_requested:
+                break
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
@@ -193,7 +196,15 @@ def get_n_params(model):
             nn = nn*s
         pp += nn
     return pp
+
+stop_requested = False
+def ctrlc_handler(signal_received, frame):
+    # Handle any cleanup here
+    global stop_requested
+    stop_requested = True
+    print("wait closing...")
 def main():
+    signal.signal(signal.SIGINT, ctrlc_handler) # ctlr + c
     t00 = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example modified')
@@ -201,8 +212,8 @@ def main():
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=10, metavar='N',
-                        help='number of epochs to train (default: 10)')
+    parser.add_argument('--epochs', type=int, default=20, metavar='N',
+                        help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                         help='learning rate (default: 1.0)')
     parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
@@ -212,6 +223,7 @@ def main():
     parser.add_argument('--singlecore',action="store_true")
     parser.add_argument('--dry-run', action='store_true', default=False,
                         help='quickly check a single pass')
+    parser.add_argument('--model-param','-p',nargs="+")    
     parser.add_argument('--dataset', choices=["cifar10","mnist"], default="mnist")
     parser.add_argument('--model', choices=["cnn","softmax","knn"], default="cnn")
     parser.add_argument('--optimizer', choices=["adadelta","adam","gdescent","sgd"], default="adam")
@@ -221,6 +233,7 @@ def main():
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
+    parser.add_argument('--resume')
     args = parser.parse_args()
     use_cuda = not args.no_gpu and torch.cuda.is_available()
 
@@ -235,6 +248,18 @@ def main():
         #torch.set_num_interop_threads(1)
         pass
     print("using intra-cor:%d inter-core:%d" % (torch.get_num_threads(),torch.get_num_interop_threads()))
+
+    if args.resume:
+        checkpoint = torch.load(os.path.splitext(args.resume)[0]+".pt")
+        info = json.load(open(os.path.splitext(args.resume)[0]+".json","r"))
+        keepargs = set(["model","dataset","optimizer"])
+        for a in keepargs:
+            v = info["args"].get(a)
+            if a is not None and hasattr(args,a):
+                setattr(args,a,v)
+    else:
+        checkpoint = None
+
     train_kwargs = {'batch_size': args.batch_size,"shuffle":True}
     test_kwargs = {'batch_size': args.test_batch_size,"shuffle":False}
     if use_cuda:
@@ -277,15 +302,23 @@ def main():
     else:
         raise Exception("unknown dataset "+args.dataset)
 
+    kwmodel = {}
+    for x in args.model_param:
+        a,b = x.split("=")
+        b = int(b)
+        kwmodel[a] = b
 
     if args.model == "cnn":
-        model = NetCNN(insize,inchannels).to(device)
+        model = NetCNN(insize,inchannels,**kwmodel).to(device)
     elif args.model == "softmax":
-        model = NetSMAX(insize,inchannels).to(device)
+        model = NetSMAX(insize,inchannels,**kwmodel).to(device)
     elif args.model == "knn":
-        model = NetKNN(insize,inchannels).to(device)
+        model = NetKNN(insize,inchannels,**kwmodel).to(device)
     else:
         raise Exeption("unknown model " + args.model)
+
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint.get("model_state_dict",checkpoint))
 
     if args.optimizer == "adam":
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -298,6 +331,8 @@ def main():
         optimizer = optim.SGD(model.parameters(), lr=args.lr,momentum=0.9)
     else:
         raise Exeption("unknown optimizer " + args.optimizer)
+    if checkpoint is not None and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     if args.dry_run:
         dataset1 = torch.utils.data.Subset(dataset1, torch.arange(1000))
@@ -307,14 +342,17 @@ def main():
     #torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     criterion = nn.CrossEntropyLoss()
-    accuracyvalue = 0
+    lastaccuracyvalue = 0
     t = time.time()
     for epoch in range(1, args.epochs + 1):
+        if stop_requested:
+            break
         train(args, model, criterion, device, train_loader, optimizer, epoch)
         tt = time.time()
         accuracyvalue,cf_matrix = test(model,criterion, device, test_loader)
         test_time = time.time()-tt
         scheduler.step()
+        lastaccuracyvalue = accuracyvalue
     training_time = time.time()-t
 
     cm = ConfutionMatrix(cf_matrix)
@@ -325,10 +363,10 @@ def main():
     cm_Fscore = cm.get2f()
     total_parameters = get_n_params(model)
     iterations = len(train_loader)//args.batch_size*args.epochs
-    out = dict(accuracy=float(accuracyvalue),machine=machine(),training_time=training_time,implementation="torch",single_core=1 if args.singlecore else 0,type='single',test=args.model,gpu=0 if args.no_gpu else 1,epochs=args.epochs,batch_size=args.batch_size,now_unix=time.time(),cm_accuracy=float(cm_accuracy),cm_Fscore=float(cm_Fscore),iterations=iterations,testing_time=test_time,total_params=total_parameters,cm_specificity=float(cm_specificity),cm_sensitivity=float(cm_sensitivity),args=vars(args))
+    out = dict(accuracy=float(accuracyvalue),machine=machine(),interrupted=stop_requested,training_time=training_time,implementation="torch",single_core=1 if args.singlecore else 0,type='single',test=args.model,gpu=0 if args.no_gpu else 1,epochs=args.epochs,batch_size=args.batch_size,now_unix=time.time(),cm_accuracy=float(cm_accuracy),cm_Fscore=float(cm_Fscore),iterations=iterations,testing_time=test_time,total_params=total_parameters,cm_specificity=float(cm_specificity),cm_sensitivity=float(cm_sensitivity),args=vars(args))
     open(go+".json","w").write(json.dumps(out,indent=4))
     #np.savetxt(go+".loss.txt", losses)
-    torch.save(model.state_dict(), go + ".pt")
+    torch.save(dict(model_state_dict=model.state_dict(),optimizer_state_dict=optimizer.state_dict()), go + ".pt")
 
     df_cm = pd.DataFrame(cf_matrix/np.sum(cf_matrix) *10, index = classes,
                      columns = classes)
